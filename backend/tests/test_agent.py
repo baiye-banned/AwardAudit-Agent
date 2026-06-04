@@ -51,7 +51,7 @@ def test_agent_registers_langchain_tools():
         "query_department_awards",
         "rank_students_by_amount",
         "search_award_records",
-        "answer_by_sql",
+        "answer_award_question",
     ]
     assert all(hasattr(tool, "invoke") for tool in tools)
 
@@ -98,10 +98,10 @@ def test_answer_question_only_runs_selected_tools():
     assert result["charts"] == []
 
 
-def test_choose_tools_routes_college_award_question_to_sql():
+def test_choose_tools_routes_college_award_question_to_pandas_query():
     selected = choose_tools("找出哪个书院的总获奖额度最多")
 
-    assert selected == ["profile_data", "answer_by_sql"]
+    assert selected == ["profile_data", "answer_award_question"]
 
 
 def test_answer_question_compares_award_amount_by_college():
@@ -119,8 +119,8 @@ def test_answer_question_compares_award_amount_by_college():
         history=[],
     )
 
-    assert "answer_by_sql" in [item["tool"] for item in result["tool_trace"]]
-    assert result["answer"].splitlines()[0] == "回答：SQL 查询结果显示：思齐住宿书院，total_amount=500，record_count=2。"
+    assert "answer_award_question" in [item["tool"] for item in result["tool_trace"]]
+    assert result["answer"].splitlines()[0] == "回答：思齐住宿书院的奖励总额最高，为 500.0 元。"
     assert "思齐住宿书院" in result["answer"]
     assert "发现缺失值" not in result["answer"]
 
@@ -177,24 +177,24 @@ def test_answer_question_sums_person_awards():
 
 
 def test_choose_tools_routes_student_ranking_and_keyword_search():
-    assert "answer_by_sql" in choose_tools("谁拿的钱最多")
+    assert "answer_award_question" in choose_tools("谁拿的钱最多")
     assert "search_award_records" in choose_tools("找一下数学建模相关奖项")
 
 
 def test_money_ranking_question_does_not_route_to_college_group_compare():
     selected = choose_tools("拿钱最多的是谁,拿了多少")
 
-    assert "answer_by_sql" in selected
+    assert "answer_award_question" in selected
     assert "compare_groups" not in selected
 
 
-def test_second_rank_amount_question_routes_to_sql_tool():
+def test_second_rank_amount_question_routes_to_pandas_query_tool():
     selected = choose_tools("拿钱第二多的是谁")
 
-    assert "answer_by_sql" in selected
+    assert "answer_award_question" in selected
 
 
-def test_answer_question_uses_sql_for_second_rank_amount_question():
+def test_answer_question_uses_pandas_for_second_rank_amount_question():
     frame = pd.DataFrame(
         {
             "姓名": ["陈子玄", "陈子玄", "王赛博", "李四"],
@@ -210,11 +210,69 @@ def test_answer_question_uses_sql_for_second_rank_amount_question():
         history=[],
     )
 
-    assert "answer_by_sql" in [item["tool"] for item in result["tool_trace"]]
-    assert result["answer"].splitlines()[0] == "回答：SQL 查询结果显示：李四，total_amount=700，record_count=1。"
+    assert "answer_award_question" in [item["tool"] for item in result["tool_trace"]]
+    assert result["answer"].splitlines()[0] == "回答：李四的奖励总额第 2 高，为 700.0 元。"
 
 
-def test_same_sql_question_returns_same_sql_and_answer():
+def test_answer_question_counts_filtered_approved_awards():
+    frame = pd.DataFrame(
+        {
+            "姓名": ["张三", "李四", "王五", "赵六"],
+            "获奖等级/收录情况": ["国A级", "省B级", "国家级A类", "国A级"],
+            "奖励金额（元）": [300, 500, 200, 800],
+            "审批状态": ["已审批", "已审批", "已审批", "待审批"],
+        }
+    )
+
+    result = answer_question(
+        question="帮我看看有几个国A级及以上的奖被审批了",
+        frame=frame,
+        history=[],
+    )
+
+    assert "answer_award_question" in [item["tool"] for item in result["tool_trace"]]
+    assert result["answer"].splitlines()[0] == "回答：国A级及以上的奖在当前名单中共有 2 条。"
+
+
+def test_answer_question_counts_national_b_or_above_awards():
+    frame = pd.DataFrame(
+        {
+            "姓名": ["张三", "李四", "王五", "赵六"],
+            "获奖等级/收录情况": ["国A级", "国B级", "国C级", "省A级"],
+            "奖励金额（元）": [300, 500, 200, 800],
+        }
+    )
+
+    result = answer_question(
+        question="有多少国b级及以上的奖被申请了",
+        frame=frame,
+        history=[],
+    )
+
+    assert "answer_award_question" in [item["tool"] for item in result["tool_trace"]]
+    assert result["answer"].splitlines()[0] == "回答：国B级及以上的奖在当前名单中共有 2 条。"
+
+
+def test_answer_question_counts_exact_national_a_awards():
+    frame = pd.DataFrame(
+        {
+            "姓名": ["张三", "李四", "王五", "赵六"],
+            "获奖等级/收录情况": ["一等奖", "二等奖", "三等奖", "一等奖"],
+            "审批依据": ["国A", "国B", "国A+", "国A（团队10人，2倍奖励）"],
+        }
+    )
+
+    result = answer_question(
+        question="国a级有几条",
+        frame=frame,
+        history=[],
+    )
+
+    assert "answer_award_question" in [item["tool"] for item in result["tool_trace"]]
+    assert result["answer"].splitlines()[0] == "回答：国A级的奖在当前名单中共有 2 条。"
+
+
+def test_same_pandas_question_returns_same_pandas_and_answer():
     frame = pd.DataFrame(
         {
             "姓名": ["陈子玄", "陈子玄", "王赛博", "李四"],

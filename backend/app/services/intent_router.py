@@ -1,9 +1,10 @@
 import json
-import os
 from typing import Any
 
 import httpx
 import pandas as pd
+
+from app.services.llm_config import get_llm_config
 
 
 ALLOWED_TOOLS = [
@@ -22,7 +23,7 @@ ALLOWED_TOOLS = [
     "query_department_awards",
     "rank_students_by_amount",
     "search_award_records",
-    "answer_by_sql",
+    "answer_award_question",
 ]
 
 
@@ -42,7 +43,7 @@ TOOL_DESCRIPTIONS = {
     "query_department_awards": "查询某个学院的获奖情况。",
     "rank_students_by_amount": "查询学生奖励金额排行。",
     "search_award_records": "按关键词搜索奖项记录。",
-    "answer_by_sql": "开放式统计、排行、次数、TopN、第几名等问题，用只读 SQL 查询。",
+    "answer_award_question": "用 pandas 回答开放式统计、排行、次数、TopN、第几名和常见筛选问题。",
 }
 
 
@@ -53,20 +54,18 @@ def choose_tools_with_llm(question: str, frame: pd.DataFrame) -> list[str]:
     没有 API Key 或调用失败时，使用 deterministic fallback。
     """
 
-    api_key = os.getenv("LLM_API_KEY")
-    if not api_key:
+    llm_config = get_llm_config()
+    if not llm_config.api_key:
         return fallback_choose_tools(question)
 
     prompt = _build_router_prompt(question, frame)
-    base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
     try:
         response = httpx.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
+            f"{llm_config.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {llm_config.api_key}"},
             json={
-                "model": model,
+                "model": llm_config.model,
                 "messages": [
                     {
                         "role": "system",
@@ -82,11 +81,11 @@ def choose_tools_with_llm(question: str, frame: pd.DataFrame) -> list[str]:
         content = response.json()["choices"][0]["message"]["content"]
         tools = _parse_router_json(content)
         if tools:
-            return tools
+            return _apply_pandas_query_hints(tools, question)
     except Exception:
         pass
 
-    return fallback_choose_tools(question)
+    return _apply_pandas_query_hints(fallback_choose_tools(question), question)
 
 
 def fallback_choose_tools(question: str) -> list[str]:
@@ -99,9 +98,13 @@ def fallback_choose_tools(question: str) -> list[str]:
     selected = ["profile_data"]
 
     if _is_award_rank_or_count_question(text):
-        selected.append("answer_by_sql")
+        selected.append("answer_award_question")
+    elif _is_filtered_count_question(text):
+        selected.append("answer_award_question")
     elif _is_person_amount_question(text):
         selected.append("query_person_awards")
+    elif _is_student_id_amount_question(text):
+        selected.append("query_student_awards_by_id")
     elif _is_group_compare_question(text):
         selected.append("compare_groups")
     elif any(word in text for word in ["图", "图表", "可视化", "chart", "plot"]):
@@ -127,14 +130,14 @@ def _build_router_prompt(question: str, frame: pd.DataFrame) -> str:
     return (
         "你是一个高校奖项名单分析 Agent 的工具路由器。\n"
         "请根据用户问题选择需要调用的 tools。\n"
-        "如果问题涉及开放式统计、排行、次数、TopN、第几名、复杂筛选，请选择 answer_by_sql。\n"
+        "如果问题涉及开放式统计、排行、次数、TopN、第几名、复杂筛选，请选择 answer_award_question。\n"
         "如果问题是某个具体姓名/学号拿了多少钱，可以选择 query_person_awards 或 query_student_awards_by_id。\n"
         "如果问题是图表，请选择 build_charts。\n"
         "必须包含 profile_data。\n"
         f"可选 tools：{json.dumps(TOOL_DESCRIPTIONS, ensure_ascii=False)}\n"
         f"表格信息：{json.dumps(profile, ensure_ascii=False)}\n"
         f"用户问题：{question}\n"
-        '只返回 JSON，例如 {"tools":["profile_data","answer_by_sql"],"reason":"..."}'
+        '只返回 JSON，例如 {"tools":["profile_data","answer_award_question"],"reason":"..."}'
     )
 
 
@@ -176,6 +179,29 @@ def _is_group_compare_question(text: str) -> bool:
     has_group = any(word in text for word in ["按", "分组", "比较", "对比", "书院", "学院", "地区", "类别"])
     has_metric = any(word in text for word in ["销售额", "金额", "额度", "奖励", "获奖", "总额"])
     return has_group and has_metric
+
+
+def _is_filtered_count_question(text: str) -> bool:
+    has_count = any(word in text for word in ["有多少", "多少", "数量", "总数", "一共多少", "共有多少", "几个", "多少个", "多少条", "几条", "统计"])
+    has_filter = any(word in text for word in ["申请", "申报", "提交", "审批", "审核", "公示", "公布", "通过", "被审批", "被申请", "被公示", "及以上", "以上", "以下", "级", "类"])
+    return has_count and has_filter
+
+
+def _is_student_id_amount_question(text: str) -> bool:
+    has_student_id = "学号" in text or "编号" in text
+    has_amount = any(word in text for word in ["多少钱", "金额", "奖励", "拿了", "总共", "一共"])
+    return has_student_id and has_amount
+
+
+def _apply_pandas_query_hints(selected_tools: list[str], question: str) -> list[str]:
+    selected = _deduplicate(selected_tools)
+    if "profile_data" not in selected:
+        selected.insert(0, "profile_data")
+
+    if (_is_award_rank_or_count_question(question) or _is_filtered_count_question(question)) and "answer_award_question" not in selected:
+        selected.append("answer_award_question")
+
+    return _deduplicate(selected)
 
 
 def _deduplicate(items: list[str]) -> list[str]:

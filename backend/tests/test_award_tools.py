@@ -1,6 +1,7 @@
 import pandas as pd
 
 from app.services.award_tools import (
+    answer_award_question,
     build_audit_report,
     infer_award_fields,
     quality_check_awards,
@@ -157,3 +158,165 @@ def test_search_award_records_finds_keyword_matches():
     assert result["keyword"] == "数学建模"
     assert result["record_count"] == 1
     assert result["records"][0]["姓名"] == "王赛博"
+
+
+def test_answer_award_question_ranks_college_by_total_amount():
+    frame = pd.DataFrame(
+        {
+            "姓名": ["陈子玄", "王赛博", "李四"],
+            "住宿书院": ["思齐住宿书院", "知行住宿书院", "知行住宿书院"],
+            "奖励金额（元）": [300, 600, 700],
+        }
+    )
+
+    result = answer_award_question(frame, "哪个书院奖励总额最高", use_llm=False)
+
+    assert result["answered"] is True
+    assert result["query_type"] == "rank"
+    assert result["rows"][0]["group"] == "知行住宿书院"
+    assert result["rows"][0]["total_amount"] == 1300
+
+
+def test_answer_award_question_ranks_student_by_award_count():
+    frame = pd.DataFrame(
+        {
+            "姓名": ["陈子玄", "陈子玄", "王赛博", "李四"],
+            "学号": ["2024001", "2024001", "2024002", "2024003"],
+            "奖励金额（元）": [300, 500, 600, 700],
+        }
+    )
+
+    result = answer_award_question(frame, "获奖最多的学生是谁", use_llm=False)
+
+    assert result["answered"] is True
+    assert result["rows"][0]["name"] == "陈子玄"
+    assert result["rows"][0]["record_count"] == 2
+
+
+def test_answer_award_question_handles_second_rank_by_amount():
+    frame = pd.DataFrame(
+        {
+            "姓名": ["陈子玄", "陈子玄", "王赛博", "李四"],
+            "学号": ["2024001", "2024001", "2024002", "2024003"],
+            "奖励金额（元）": [300, 500, 600, 700],
+        }
+    )
+
+    result = answer_award_question(frame, "拿钱第二多的是谁", use_llm=False)
+
+    assert result["answered"] is True
+    assert result["rank_index"] == 2
+    assert result["rows"][0]["name"] == "李四"
+    assert result["rows"][0]["total_amount"] == 700
+
+
+def test_answer_award_question_counts_filtered_approved_awards():
+    frame = pd.DataFrame(
+        {
+            "姓名": ["张三", "李四", "王五", "赵六"],
+            "获奖等级/收录情况": ["国A级", "省B级", "国家级A类", "国A级"],
+            "奖励金额（元）": [300, 500, 200, 800],
+            "审批状态": ["已审批", "已审批", "已审批", "待审批"],
+        }
+    )
+
+    result = answer_award_question(frame, "帮我看看有几个国A级及以上的奖被审批了", use_llm=False)
+
+    assert result["answered"] is True
+    assert result["query_type"] == "count"
+    assert result["record_count"] == 2
+
+
+def test_answer_award_question_counts_national_b_or_above_without_status_column():
+    frame = pd.DataFrame(
+        {
+            "姓名": ["张三", "李四", "王五", "赵六"],
+            "获奖等级/收录情况": ["国A级", "国B级", "国C级", "省A级"],
+            "奖励金额（元）": [300, 500, 200, 800],
+        }
+    )
+
+    result = answer_award_question(frame, "有多少国b级及以上的奖被申请了", use_llm=False)
+
+    assert result["answered"] is True
+    assert result["record_count"] == 2
+    assert result["condition_text"] == "国B级及以上的奖"
+    assert result["notes"] == ["未发现状态列，按当前名单记录计数"]
+
+
+def test_answer_award_question_filters_apply_status_when_status_column_exists():
+    frame = pd.DataFrame(
+        {
+            "姓名": ["张三", "李四", "王五", "赵六"],
+            "获奖等级/收录情况": ["国A级", "国B级", "国B级", "国A级"],
+            "申请状态": ["已申请", "未申请", "已申报", "已提交"],
+        }
+    )
+
+    result = answer_award_question(frame, "有多少国b级及以上的奖被申请了", use_llm=False)
+
+    assert result["answered"] is True
+    assert result["record_count"] == 3
+
+
+def test_answer_award_question_counts_province_b_or_above():
+    frame = pd.DataFrame(
+        {
+            "姓名": ["张三", "李四", "王五", "赵六", "钱七", "孙八"],
+            "获奖等级/收录情况": ["国C级", "省A级", "省B级", "省C级", "校A级", "国家级B类"],
+        }
+    )
+
+    result = answer_award_question(frame, "多少省B级及以上的奖被公示了", use_llm=False)
+
+    assert result["answered"] is True
+    assert result["record_count"] == 4
+    assert result["condition_text"] == "省B级及以上的奖"
+
+
+def test_answer_award_question_counts_exact_level_without_threshold_words():
+    frame = pd.DataFrame(
+        {
+            "姓名": ["张三", "李四", "王五", "赵六"],
+            "获奖等级/收录情况": ["一等奖", "二等奖", "三等奖", "一等奖"],
+            "审批依据": ["国A", "国B", "国A+", "国A（团队10人，2倍奖励）"],
+        }
+    )
+
+    result = answer_award_question(frame, "国a级有几条", use_llm=False)
+
+    assert result["answered"] is True
+    assert result["record_count"] == 2
+    assert result["condition_text"] == "国A级的奖"
+    assert result["filters"][0]["column"] == "审批依据"
+
+
+def test_answer_award_question_uses_approval_basis_for_level_conditions():
+    frame = pd.DataFrame(
+        {
+            "姓名": ["张三", "李四", "王五", "赵六"],
+            "获奖等级/收录情况": ["一等奖", "二等奖", "三等奖", "一等奖"],
+            "审批依据": ["国A", "国B", "省A", "国C"],
+        }
+    )
+
+    result = answer_award_question(frame, "看看国b级以上的申请有多少", use_llm=False)
+
+    assert result["answered"] is True
+    assert result["record_count"] == 2
+    assert result["condition_text"] == "国B级及以上的奖"
+    assert result["filters"][0]["column"] == "审批依据"
+
+
+def test_answer_award_question_reports_missing_level_field_for_threshold_count():
+    frame = pd.DataFrame(
+        {
+            "姓名": ["张三", "李四"],
+            "奖励金额（元）": [300, 500],
+        }
+    )
+
+    result = answer_award_question(frame, "有多少国b级及以上的奖被申请了", use_llm=False)
+
+    assert result["answered"] is False
+    assert result["message"] == "缺少奖项等级字段，无法按等级条件计数"

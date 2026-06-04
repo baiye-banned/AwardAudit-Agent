@@ -26,6 +26,10 @@ Thumbs.db
 *.pid
 frontend.pid
 
+# Private local sample data
+backend/sample_data/*获奖*名单*.xlsx
+backend/sample_data/private/
+
 # Local planning / agent workspace records
 docs/aegis/
 

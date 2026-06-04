@@ -1,4 +1,3 @@
-import os
 from typing import Any
 
 import httpx
@@ -6,6 +5,7 @@ import pandas as pd
 from langchain_core.tools import StructuredTool
 
 from app.services.award_tools import (
+    answer_award_question,
     build_audit_report,
     infer_award_fields,
     quality_check_awards,
@@ -25,7 +25,7 @@ from app.services.data_tools import (
     find_outliers,
 )
 from app.services.intent_router import choose_tools_with_llm, fallback_choose_tools
-from app.services.sql_tools import answer_by_sql
+from app.services.llm_config import get_llm_config
 
 
 def answer_question(
@@ -121,8 +121,8 @@ def create_analysis_tools(frame: pd.DataFrame) -> list[StructuredTool]:
     def search_award_record_data(question: str = "") -> dict[str, Any]:
         return search_award_records(frame, question=question)
 
-    def answer_by_sql_data(question: str = "") -> dict[str, Any]:
-        return answer_by_sql(frame, question=question)
+    def answer_award_question_data(question: str = "") -> dict[str, Any]:
+        return answer_award_question(frame, question=question)
 
     return [
         StructuredTool.from_function(
@@ -201,9 +201,9 @@ def create_analysis_tools(frame: pd.DataFrame) -> list[StructuredTool]:
             description="按关键词搜索赛事名称、奖项等级、举办单位等文本字段中的获奖记录。",
         ),
         StructuredTool.from_function(
-            func=answer_by_sql_data,
-            name="answer_by_sql",
-            description="把开放式统计问题转成安全只读 SQL，在临时 SQLite 表 awards 上查询。",
+            func=answer_award_question_data,
+            name="answer_award_question",
+            description="用 pandas 回答奖项名单中的开放式统计、排行、次数和常见筛选问题。",
         ),
     ]
 
@@ -229,7 +229,7 @@ def _run_tools(tools: list[StructuredTool], selected_tools: list[str], question:
             "query_department_awards",
             "rank_students_by_amount",
             "search_award_records",
-            "answer_by_sql",
+            "answer_award_question",
         ]:
             result = tool.invoke({"question": question})
         else:
@@ -267,20 +267,18 @@ def _summarize_with_llm_or_fallback(
 ) -> str:
     """优先调用云端模型；未配置或调用失败时使用本地模板。"""
 
-    api_key = os.getenv("LLM_API_KEY")
-    if not api_key:
+    llm_config = get_llm_config()
+    if not llm_config.api_key:
         return _fallback_answer(question, profile, tool_results)
 
-    base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
     prompt = _build_prompt(question, profile, tool_results, history)
 
     try:
         response = httpx.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
+            f"{llm_config.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {llm_config.api_key}"},
             json={
-                "model": model,
+                "model": llm_config.model,
                 "messages": [
                     {
                         "role": "system",
@@ -392,9 +390,9 @@ def _fallback_answer(
 def _build_direct_answer(tool_results: dict[str, Any]) -> str | None:
     """如果工具结果已经能直接回答问题，就把结论放到第一句。"""
 
-    sql_result = tool_results.get("answer_by_sql")
-    if sql_result and sql_result.get("success") and sql_result.get("rows"):
-        return _format_sql_answer(sql_result["rows"][0])
+    award_answer = tool_results.get("answer_award_question")
+    if award_answer and award_answer.get("answered"):
+        return _format_award_answer(award_answer)
 
     for tool_name in ["query_person_awards", "query_student_awards_by_id"]:
         result = tool_results.get(tool_name)
@@ -440,20 +438,29 @@ def _build_direct_answer(tool_results: dict[str, Any]) -> str | None:
     )
 
 
-def _format_sql_answer(row: dict[str, Any]) -> str:
-    if not row:
-        return "SQL 查询没有返回结果。"
+def _format_award_answer(result: dict[str, Any]) -> str:
+    if result.get("query_type") == "count":
+        condition_text = result.get("condition_text") or "符合条件的奖"
+        return f"{condition_text}在当前名单中共有 {result.get('record_count', 0)} 条。"
 
-    first_value = next(iter(row.values()))
-    details = "，".join(
-        f"{key}={value}"
-        for key, value in row.items()
-        if value != first_value
-    )
+    rows = result.get("rows") or []
+    if not rows:
+        return result.get("message") or "没有得到可回答的统计结果。"
 
-    if details:
-        return f"SQL 查询结果显示：{first_value}，{details}。"
-    return f"SQL 查询结果显示：{first_value}。"
+    row = rows[0]
+    rank_index = result.get("rank_index", 1)
+    rank_text = "最高" if rank_index == 1 else f"第 {rank_index} 高"
+
+    if result.get("entity") == "student":
+        name = row.get("name") or row.get("student_id") or "该学生"
+        if result.get("metric") == "award_count":
+            return f"{name}获奖次数最多，共 {row.get('award_count', row.get('record_count', 0))} 次。"
+        return f"{name}的奖励总额{rank_text}，为 {row.get('total_amount', 0)} 元。"
+
+    group = row.get("group") or "该分组"
+    if result.get("metric") == "award_count":
+        return f"{group}获奖记录数{rank_text}，共 {row.get('award_count', row.get('record_count', 0))} 条。"
+    return f"{group}的奖励总额{rank_text}，为 {row.get('total_amount', 0)} 元。"
 
 
 def _should_route_person_query(text: str) -> bool:
