@@ -214,6 +214,129 @@ def test_answer_question_uses_pandas_for_second_rank_amount_question():
     assert result["answer"].splitlines()[0] == "回答：李四的奖励总额第 2 高，为 700.0 元。"
 
 
+def test_answer_question_uses_llm_intent_for_bonus_amount_ranking(monkeypatch):
+    frame = pd.DataFrame(
+        {
+            "姓名": ["陈子玄", "王赛博", "李四"],
+            "学号": ["2024001", "2024002", "2024003"],
+            "奖励金额（元）": [300, 600, 700],
+        }
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+
+    def fake_post(*args, **kwargs):
+        url = args[0]
+        if "chat/completions" not in url:
+            raise AssertionError("unexpected url")
+
+        messages = kwargs["json"]["messages"]
+        prompt = messages[-1]["content"]
+        if "工具路由器" in prompt:
+            content = '{"intent":"award_question","tools":["profile_data"]}'
+        elif "查询计划" in prompt:
+            content = '{"intent":"rank","entity":"student","metric":"sum_amount","rank_index":1}'
+        else:
+            raise RuntimeError("skip answer summary llm")
+
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            status_code=200,
+            request=request,
+            json={"choices": [{"message": {"content": content}}]},
+        )
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = answer_question(
+        question="哪位同学获得资助额度最大",
+        frame=frame,
+        history=[],
+    )
+
+    assert "answer_award_question" in [item["tool"] for item in result["tool_trace"]]
+    assert result["answer"].splitlines()[0] == "回答：李四的奖励总额最高，为 700.0 元。"
+
+
+def test_answer_question_prefers_direct_pandas_answer_over_llm_summary(monkeypatch):
+    frame = pd.DataFrame(
+        {
+            "姓名": ["陈子玄", "王赛博", "李四"],
+            "学号": ["2024001", "2024002", "2024003"],
+            "奖励金额（元）": [300, 600, 700],
+        }
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+
+    def fake_post(*args, **kwargs):
+        url = args[0]
+        messages = kwargs["json"]["messages"]
+        prompt = messages[-1]["content"]
+        if "工具路由器" in prompt:
+            content = '{"intent":"award_question","tools":["profile_data"]}'
+        elif "查询计划" in prompt:
+            content = '{"intent":"rank","entity":"student","metric":"sum_amount","rank_index":1}'
+        else:
+            content = "错误总结：我已经分析了表格，但没有直接答案。"
+
+        return httpx.Response(
+            status_code=200,
+            request=httpx.Request("POST", url),
+            json={"choices": [{"message": {"content": content}}]},
+        )
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = answer_question(
+        question="哪位同学获得资助额度最大",
+        frame=frame,
+        history=[],
+    )
+
+    assert result["answer"].splitlines()[0] == "回答：李四的奖励总额最高，为 700.0 元。"
+
+
+def test_llm_summary_prompt_does_not_include_all_profile_rows(monkeypatch):
+    frame = pd.DataFrame(
+        {
+            "姓名": ["张三", "李四", "王五"],
+            "学号": ["secret-1", "secret-2", "secret-3"],
+            "奖励金额（元）": [300, 600, 700],
+        }
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    prompts = []
+
+    def fake_post(*args, **kwargs):
+        url = args[0]
+        prompt = kwargs["json"]["messages"][-1]["content"]
+        prompts.append(prompt)
+
+        if "工具路由器" in prompt:
+            content = '{"tools":["profile_data","analyze_data"]}'
+        else:
+            content = "普通总结"
+
+        return httpx.Response(
+            status_code=200,
+            request=httpx.Request("POST", url),
+            json={"choices": [{"message": {"content": content}}]},
+        )
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    answer_question("分析一下整体情况", frame=frame, history=[])
+
+    summary_prompt = prompts[-1]
+    assert "all_rows" not in summary_prompt
+    assert "secret-3" not in summary_prompt
+
+
 def test_answer_question_counts_filtered_approved_awards():
     frame = pd.DataFrame(
         {

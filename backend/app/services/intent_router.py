@@ -148,6 +148,9 @@ def _parse_router_json(content: str) -> list[str]:
         text = text.removeprefix("json").strip()
 
     data = json.loads(text)
+    if data.get("intent") == "award_question":
+        return ["profile_data", "answer_award_question"]
+
     raw_tools = data.get("tools", [])
     if not isinstance(raw_tools, list):
         return []
@@ -162,22 +165,22 @@ def _parse_router_json(content: str) -> list[str]:
 
 
 def _is_award_rank_or_count_question(text: str) -> bool:
-    has_rank = any(word in text for word in ["最多", "最高", "第一", "第二", "第三", "第", "top", "前"])
-    has_award = any(word in text for word in ["获奖", "奖励", "钱", "金额", "额度"])
-    has_target = any(word in text for word in ["谁", "学生", "书院", "学院", "人"])
+    has_rank = _has_rank_word(text)
+    has_award = _has_amount_word(text) or "获奖" in text
+    has_target = _has_target_word(text)
     return has_rank and has_award and has_target
 
 
 def _is_person_amount_question(text: str) -> bool:
-    has_amount = any(word in text for word in ["多少钱", "拿了", "一共", "总共", "奖励", "金额", "钱"])
-    asks_ranking = any(word in text for word in ["谁", "最多", "最高", "第", "top", "前"])
+    has_amount = _has_amount_word(text) or any(word in text for word in ["多少钱", "拿了", "一共", "总共"])
+    asks_ranking = _has_rank_word(text) or "谁" in text
     mentions_group = any(word in text for word in ["书院", "学院", "地区", "类别"])
     return has_amount and not asks_ranking and not mentions_group
 
 
 def _is_group_compare_question(text: str) -> bool:
     has_group = any(word in text for word in ["按", "分组", "比较", "对比", "书院", "学院", "地区", "类别"])
-    has_metric = any(word in text for word in ["销售额", "金额", "额度", "奖励", "获奖", "总额"])
+    has_metric = any(word in text for word in ["销售额", "获奖", "总额"]) or _has_amount_word(text)
     return has_group and has_metric
 
 
@@ -189,7 +192,7 @@ def _is_filtered_count_question(text: str) -> bool:
 
 def _is_student_id_amount_question(text: str) -> bool:
     has_student_id = "学号" in text or "编号" in text
-    has_amount = any(word in text for word in ["多少钱", "金额", "奖励", "拿了", "总共", "一共"])
+    has_amount = _has_amount_word(text) or any(word in text for word in ["多少钱", "拿了", "总共", "一共"])
     return has_student_id and has_amount
 
 
@@ -202,6 +205,18 @@ def _apply_pandas_query_hints(selected_tools: list[str], question: str) -> list[
         selected.append("answer_award_question")
 
     return _deduplicate(selected)
+
+
+def _has_amount_word(text: str) -> bool:
+    return any(word in text for word in ["钱", "金额", "额度", "奖励", "奖金", "奖励金", "奖金额"])
+
+
+def _has_rank_word(text: str) -> bool:
+    return any(word in text for word in ["最多", "最高", "最大", "第一", "第二", "第三", "第", "top", "前"])
+
+
+def _has_target_word(text: str) -> bool:
+    return any(word in text for word in ["谁", "学生", "同学", "书院", "学院", "人", "哪位"])
 
 
 def _deduplicate(items: list[str]) -> list[str]:

@@ -267,6 +267,10 @@ def _summarize_with_llm_or_fallback(
 ) -> str:
     """优先调用云端模型；未配置或调用失败时使用本地模板。"""
 
+    direct_answer = _build_direct_answer(tool_results)
+    if direct_answer:
+        return _fallback_answer(question, profile, tool_results)
+
     llm_config = get_llm_config()
     if not llm_config.api_key:
         return _fallback_answer(question, profile, tool_results)
@@ -304,14 +308,44 @@ def _build_prompt(
     history: list[dict[str, str]],
 ) -> str:
     recent_history = history[-4:]
+    safe_profile = _profile_for_llm(profile)
+    safe_tool_results = _tool_results_for_llm(tool_results)
     return (
         "用户正在分析一个表格数据集。\n"
         f"用户问题：{question}\n\n"
-        f"数据概览：{profile}\n\n"
-        f"LangChain tools 的执行结果：{tool_results}\n\n"
+        f"数据概览：{safe_profile}\n\n"
+        f"LangChain tools 的执行结果：{safe_tool_results}\n\n"
         f"最近对话：{recent_history}\n\n"
         "请输出：1）直接回答；2）关键发现；3）建议继续追问的问题。"
     )
+
+
+def _profile_for_llm(profile: dict[str, Any]) -> dict[str, Any]:
+    """LLM 总结只需要概览，不需要完整明细行。"""
+
+    blocked_keys = {"all_rows", "sample_rows"}
+    return {
+        key: value
+        for key, value in profile.items()
+        if key not in blocked_keys
+    }
+
+
+def _tool_results_for_llm(tool_results: dict[str, Any]) -> dict[str, Any]:
+    safe_results = dict(tool_results)
+
+    profile = safe_results.get("profile_data")
+    if isinstance(profile, dict):
+        safe_results["profile_data"] = _profile_for_llm(profile)
+
+    analysis = safe_results.get("analyze_data")
+    if isinstance(analysis, dict) and isinstance(analysis.get("profile"), dict):
+        safe_analysis = dict(analysis)
+        safe_analysis["profile"] = _profile_for_llm(analysis["profile"])
+        safe_analysis.pop("top_categories", None)
+        safe_results["analyze_data"] = safe_analysis
+
+    return safe_results
 
 
 def _fallback_answer(

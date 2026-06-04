@@ -210,6 +210,128 @@ def test_answer_award_question_handles_second_rank_by_amount():
     assert result["rows"][0]["total_amount"] == 700
 
 
+def test_answer_award_question_uses_llm_query_plan_for_bonus_ranking(monkeypatch):
+    frame = pd.DataFrame(
+        {
+            "姓名": ["陈子玄", "王赛博", "李四"],
+            "学号": ["2024001", "2024002", "2024003"],
+            "奖励金额（元）": [300, 600, 700],
+        }
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+
+    def fake_post(*args, **kwargs):
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"intent":"rank","entity":"student",'
+                                    '"metric":"sum_amount","rank_index":1}'
+                                )
+                            }
+                        }
+                    ]
+                }
+
+        return FakeResponse()
+
+    monkeypatch.setattr("app.services.award_queries.httpx.post", fake_post)
+
+    result = answer_award_question(frame, "哪位同学获得资助额度最大")
+
+    assert result["answered"] is True
+    assert result["query_type"] == "rank"
+    assert result["rows"][0]["name"] == "李四"
+    assert result["rows"][0]["total_amount"] == 700
+
+
+def test_answer_award_question_uses_llm_query_plan_for_second_bonus_ranking(monkeypatch):
+    frame = pd.DataFrame(
+        {
+            "姓名": ["陈子玄", "王赛博", "李四"],
+            "学号": ["2024001", "2024002", "2024003"],
+            "奖励金额（元）": [300, 600, 700],
+        }
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+
+    def fake_post(*args, **kwargs):
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"intent":"rank","entity":"student",'
+                                    '"metric":"sum_amount","rank_index":2}'
+                                )
+                            }
+                        }
+                    ]
+                }
+
+        return FakeResponse()
+
+    monkeypatch.setattr("app.services.award_queries.httpx.post", fake_post)
+
+    result = answer_award_question(frame, "奖金第二多的是谁")
+
+    assert result["answered"] is True
+    assert result["rank_index"] == 2
+    assert result["rows"][0]["name"] == "王赛博"
+    assert result["rows"][0]["total_amount"] == 600
+
+
+def test_answer_award_question_falls_back_when_llm_count_plan_is_not_executable(monkeypatch):
+    frame = pd.DataFrame(
+        {
+            "姓名": ["张三", "李四", "王五", "赵六"],
+            "获奖等级/收录情况": ["国A级", "国B级", "国C级", "省A级"],
+            "奖励金额（元）": [300, 500, 200, 800],
+        }
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+
+    def fake_post(*args, **kwargs):
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"intent":"count","entity":"record",'
+                                    '"metric":"record_count","rank_index":1}'
+                                )
+                            }
+                        }
+                    ]
+                }
+
+        return FakeResponse()
+
+    monkeypatch.setattr("app.services.award_queries.httpx.post", fake_post)
+
+    result = answer_award_question(frame, "有多少国b级及以上的奖被申请了")
+
+    assert result["answered"] is True
+    assert result["record_count"] == 2
+    assert result["condition_text"] == "国B级及以上的奖"
+
+
 def test_answer_award_question_counts_filtered_approved_awards():
     frame = pd.DataFrame(
         {
